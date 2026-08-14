@@ -11,7 +11,17 @@ Gestures:
   one finger up     -> memes/profcat.jpg, memes/professorcat.jpg
   fist / punch      -> memes/punchcat.jpg
   shhh              -> memes/shhcat.jpg
-  two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg
+  two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
+                                                        memes/fingers together muehehe .jpg
+  hand covering face -> memes/hand cover face .jpg
+  crash-out cat (two hands up beside the face)            -> memes/crashout cat .jpg
+  two hands on head                                        -> memes/two hands on head .jpg
+  hand stretched out, palm facing camera (open hand)       -> memes/hand stretched out, palm facing up .jpg
+  side eye (head turned to the side)                       -> memes/side eye cat.jpg
+
+The Camera window shows a live debug readout (head yaw in degrees vs. the
+trigger threshold) in the top-left corner so side-eye can be tuned by eye -
+see SIDE_EYE_YAW_DEG below.
 
 Press q or ESC to quit.
 """
@@ -43,12 +53,31 @@ GESTURE_MEMES = {
     "oneFingerUp": ["profcat.jpg", "professorcat.jpg"],
     "fist": ["punchcat.jpg"],
     "shhh": ["shhcat.jpg"],
-    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg"],
+    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],
+    "handCoverFace": ["hand cover face .jpg"],
+    "crashOutCat": ["crashout cat .jpg"],
+    "twoHandsOnHead": ["two hands on head .jpg"],
+    "handStretchedOut": ["hand stretched out, palm facing up .jpg"],
+    "sideEyeCat": ["side eye cat.jpg"],
 }
 
 STABLE_FRAMES_REQUIRED = 5
 DEFAULT_FALLBACK_MS = 600
 FACE_STALE_MS = 1200
+
+# how far the head has to turn (yaw, in degrees, from MediaPipe's own head
+# pose estimate - not a hand-rolled distance heuristic) to count as a
+# side-eye look. Watch the live "yaw" readout in the Camera window while
+# turning your head to find the right value for you.
+SIDE_EYE_YAW_DEG = 15.0
+
+# hand-covering-face: how close the hand needs to be to where the mouth
+# last was. Wider when the face detector has fully lost the face (strong
+# evidence of a real occlusion); tighter when the face is still partially
+# tracked (weaker evidence, avoid false positives from a hand just passing
+# near the face).
+HAND_COVER_FACE_DIST_FACE_LOST = 1.3
+HAND_COVER_FACE_DIST_FACE_SEEN = 0.7
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -83,6 +112,19 @@ def finger_extended(pts, mcp, pip, tip):
     return angle_deg(v1, v2) < 45
 
 
+def yaw_from_transform_matrix(matrix):
+    """Extract the head's left/right turn angle (yaw, degrees) from
+    MediaPipe's facial transformation matrix - its own estimate of head
+    pose, far more robust than trying to infer turn from landmark
+    distances."""
+    r = np.asarray(matrix)[:3, :3]
+    sy = math.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
+    if sy < 1e-6:
+        return 0.0
+    yaw = math.atan2(-r[2, 0], sy)
+    return math.degrees(yaw)
+
+
 def classify_hand(landmarks):
     pts = [p3(lm) for lm in landmarks]
     hand_scale = dist(pts[0], pts[9]) or 1e-6
@@ -106,6 +148,8 @@ def classify_hand(landmarks):
         "curledCount": curled_count,
         "handScale": hand_scale,
         "indexTip": pts[8],
+        "wrist": pts[0],
+        "palmCenter": pts[9],
     }
 
 
@@ -115,28 +159,61 @@ def is_pointing(h):
 
 class GestureState:
     def __init__(self):
-        self.last_face = None  # (mouth_center, face_width, t)
+        self.last_face = None  # (mouth_center, face_width, mouth_open, yaw_deg, t)
+        self.face_seen_this_frame = False
+        self.last_yaw_debug = 0.0
 
     def update_face(self, face_result):
         now = time.time() * 1000
-        if face_result.face_landmarks:
+        saw_face = bool(face_result.face_landmarks)
+
+        if saw_face:
             f = face_result.face_landmarks[0]
             upper_lip, lower_lip = p3(f[13]), p3(f[14])
+            right_cheek, left_cheek = p3(f[234]), p3(f[454])
             mouth_center = (upper_lip + lower_lip) / 2
-            face_width = dist(p3(f[234]), p3(f[454]))
-            self.last_face = (mouth_center, face_width, now)
+            face_width = dist(right_cheek, left_cheek)
+            mouth_open = dist(upper_lip, lower_lip) / face_width
+
+            yaw_deg = 0.0
+            if face_result.facial_transformation_matrixes:
+                yaw_deg = yaw_from_transform_matrix(face_result.facial_transformation_matrixes[0])
+
+            self.last_face = (mouth_center, face_width, mouth_open, yaw_deg, now)
+            self.last_yaw_debug = yaw_deg
+        self.face_seen_this_frame = saw_face
 
     def decide(self, hand_result):
+        now = time.time() * 1000
+        face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
+
         if not hand_result.hand_landmarks:
+            # no hands: side-eye is a face-only pose (head turned, no
+            # particular hand shape needed).
+            if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
+                return "sideEyeCat"
             return "default"
 
         hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
 
-        if len(hands) == 2 and is_pointing(hands[0]) and is_pointing(hands[1]):
-            avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
-            tip_gap = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
-            if tip_gap < 1.4:
-                return "twoFingersTogether"
+        if len(hands) == 2:
+            if is_pointing(hands[0]) and is_pointing(hands[1]):
+                avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
+                tip_gap = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
+                if tip_gap < 1.4:
+                    return "twoFingersTogether"
+
+            if face_is_fresh:
+                mouth_center, face_width, _, _, _ = self.last_face
+                near_face = all(
+                    dist(h["palmCenter"], mouth_center) / face_width < 2.2 for h in hands
+                )
+                if near_face:
+                    head_top_y = mouth_center[1] - face_width * 1.1
+                    both_above_head = all(h["palmCenter"][1] < head_top_y for h in hands)
+                    if both_above_head:
+                        return "twoHandsOnHead"
+                    return "crashOutCat"
 
         h = hands[0]
 
@@ -146,14 +223,42 @@ class GestureState:
         if h["thumbOut"] and h["pinkyUp"] and not h["indexUp"] and not h["middleUp"] and not h["ringUp"]:
             return "rockstar"
 
+        # shhh / one-finger-up: a single extended index finger is a very
+        # specific shape (shhh in particular = fingertip right on the
+        # mouth), so it must be checked before the broader hand-covering-
+        # face test below - otherwise a shhh pose (finger near the mouth)
+        # gets swallowed by the "any hand near the face" check.
         if h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
-            now = time.time() * 1000
-            if self.last_face and now - self.last_face[2] < FACE_STALE_MS:
-                mouth_center, face_width, _ = self.last_face
+            if face_is_fresh:
+                mouth_center, face_width, _, _, _ = self.last_face
                 d = dist(h["indexTip"], mouth_center) / face_width
                 if d < 0.55:
                     return "shhh"
             return "oneFingerUp"
+
+        # hand covering face: the one hand we see sits roughly where the
+        # face last was. Wider tolerance if the face detector has fully
+        # lost the face (strong evidence of a real occlusion); tighter if
+        # it's still partially tracking through the fingers.
+        if face_is_fresh:
+            mouth_center, face_width, _, _, _ = self.last_face
+            d = dist(h["palmCenter"], mouth_center) / face_width
+            threshold = (
+                HAND_COVER_FACE_DIST_FACE_LOST
+                if not self.face_seen_this_frame
+                else HAND_COVER_FACE_DIST_FACE_SEEN
+            )
+            if d < threshold:
+                return "handCoverFace"
+
+        # open palm held out, not near the face
+        if h["curledCount"] == 0:
+            return "handStretchedOut"
+
+        # hands are up but not making a specific shape - still allow a
+        # strong side-eye read to win over an ambiguous hand pose.
+        if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
+            return "sideEyeCat"
 
         return "default"
 
@@ -169,6 +274,17 @@ def load_memes():
             imgs.append(img)
         cache[gesture] = imgs
     return cache
+
+
+def draw_debug_hud(frame, state, gesture):
+    lines = [
+        f"gesture: {gesture}",
+        f"yaw: {state.last_yaw_debug:+.1f} deg  (side-eye thr +/-{SIDE_EYE_YAW_DEG:.1f})",
+    ]
+    for i, line in enumerate(lines):
+        y = 24 + i * 22
+        cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 120), 1, cv2.LINE_AA)
 
 
 def draw_landmarks(frame, hand_result):
@@ -200,6 +316,7 @@ def main():
             base_options=BaseOptions(model_asset_path=str(MODELS / "face_landmarker.task")),
             running_mode=RunningMode.VIDEO,
             num_faces=1,
+            output_facial_transformation_matrixes=True,
         )
     )
 
@@ -257,6 +374,7 @@ def main():
                 current_meme = random.choice(memes["default"])
 
             draw_landmarks(frame, hand_result)
+            draw_debug_hud(frame, state, current_gesture)
 
             meme_view = fit_to_height(current_meme, frame.shape[0])
             cv2.imshow("Camera", frame)

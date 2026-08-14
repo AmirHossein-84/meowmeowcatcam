@@ -33,12 +33,28 @@
     object-fit: contain;
     background: #000;
   }
+  #debugHud {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    color: #7cffa0;
+    font: 13px/1.4 monospace;
+    white-space: pre;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
+    pointer-events: none;
+    z-index: 2;
+  }
 </style>
 </head>
 <body>
   <div class="split">
-    <div class="pane"><video id="video" playsinline muted autoplay></video></div>
-    <div class="pane"><img id="memeImg" src="memes/pokercat.jpg" alt="" /></div>
+    <div class="pane">
+      <video id="video" playsinline muted autoplay></video>
+      <div id="debugHud"></div>
+    </div>
+    <div class="pane">
+      <img id="memeImg" src="memes/pokercat.jpg" alt="" />
+    </div>
   </div>
 
   <script type="module" src="app.js"></script>
