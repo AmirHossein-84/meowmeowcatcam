@@ -450,16 +450,37 @@ def main():
     flow_log = open(flow_log_path, "w", buffering=1)  # line-buffered so data survives a hard kill
     flow_log.write("t_ms,magnitude,coherence,score,fraction,peak_2s,gesture\n")
 
-    spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))
-    if not spin_video_cap.isOpened():
-        raise FileNotFoundError(f"missing meme file: {MEMES / GESTURE_MEMES['spinCat'][0]}")
+    # load every frame of the spin video into memory once, up front, instead
+    # of re-seeking the file with cv2.CAP_PROP_POS_FRAMES each time the
+    # gesture retriggers. Frame-accurate seeking on .mov files is unreliable
+    # on macOS (can silently fail or return the wrong frame) - for a clip
+    # this short (a couple seconds), just holding every frame in memory and
+    # stepping through a plain list sidesteps that entirely.
+    spin_video_path = MEMES / GESTURE_MEMES["spinCat"][0]
+    _spin_cap = cv2.VideoCapture(str(spin_video_path))
+    if not _spin_cap.isOpened():
+        raise FileNotFoundError(f"missing meme file: {spin_video_path}")
+    spin_frames = []
+    while True:
+        ok, vframe = _spin_cap.read()
+        if not ok:
+            break
+        spin_frames.append(vframe)
+    _spin_cap.release()
+    if not spin_frames:
+        raise RuntimeError(f"could not decode any frames from: {spin_video_path}")
+
+    spin_frame_index = 0
 
     def next_spin_frame():
-        ok, vframe = spin_video_cap.read()
-        if not ok:
-            spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, vframe = spin_video_cap.read()
+        nonlocal spin_frame_index
+        vframe = spin_frames[spin_frame_index % len(spin_frames)]
+        spin_frame_index += 1
         return vframe
+
+    def reset_spin_playback():
+        nonlocal spin_frame_index
+        spin_frame_index = 0
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -516,7 +537,7 @@ def main():
                 if gesture not in VIDEO_GESTURES:
                     current_meme = random.choice(memes[gesture])
                 elif gesture == "spinCat":
-                    spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    reset_spin_playback()
 
             if gesture != "default":
                 last_non_default_at = now
@@ -528,12 +549,7 @@ def main():
             draw_debug_hud(frame, state, current_gesture)
 
             if current_gesture == "spinCat":
-                vframe = next_spin_frame()
-                meme_view = (
-                    fit_to_height(vframe, frame.shape[0])
-                    if vframe is not None
-                    else fit_to_height(current_meme, frame.shape[0])
-                )
+                meme_view = fit_to_height(next_spin_frame(), frame.shape[0])
             else:
                 meme_view = fit_to_height(current_meme, frame.shape[0])
             cv2.imshow("Camera", frame)
@@ -544,7 +560,6 @@ def main():
                 break
     finally:
         cap.release()
-        spin_video_cap.release()
         flow_log.close()
         cv2.destroyAllWindows()
         hand_landmarker.close()
