@@ -14,11 +14,23 @@ Gestures:
   two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
                                                         memes/fingers together muehehe .jpg
   hand covering face -> memes/hand cover face .jpg
-  crash-out cat (two hands up beside the face)            -> memes/crashout cat .jpg
+  crash-out cat (two CLENCHED FISTS up beside the face)   -> memes/crashout cat .jpg
   two hands on head                                        -> memes/two hands on head .jpg
+  dance cat (two open palms, one near top of screen, one near bottom)  -> memes/two palms up.mov (video)
   hand stretched out, palm facing camera (open hand)       -> memes/hand stretched out, palm facing up .jpg
   side eye (head turned to the side)                       -> memes/side eye cat.jpg
+  slight side eye (head tilted DOWN, not turned)            -> memes/side eye.png
+  mouth wide open, WITH a hand visible somewhere in frame  -> memes/laugh and point .jpg
+  huh cat (mouth open AND eyes wide, no hands)               -> memes/huh.png
+  shrug cat (both hands up and out to the sides)             -> memes/iunno cat.jpg
   spin cat (spinning fast in your chair)                   -> memes/spin cat.mov (plays as a video)
+
+Facial expressions (mouth-open above) use MediaPipe's face blendshapes -
+pre-computed expression scores (0-1) that come from the same face model,
+rather than hand-rolled landmark geometry. Several more scores are already
+being read and shown on the debug HUD (smile, brow-raise, wink) but not
+wired to a meme yet - see the "facial expression thresholds" section below
+to add more once you've picked images for them.
 
 The Camera window shows a live debug readout (head yaw, and optical-flow
 magnitude/coherence, vs. their trigger thresholds) in the top-left corner so
@@ -61,11 +73,15 @@ GESTURE_MEMES = {
     "twoHandsOnHead": ["two hands on head .jpg"],
     "handStretchedOut": ["hand stretched out, palm facing up .jpg"],
     "sideEyeCat": ["side eye cat.jpg"],
+    "sideEyeDownCat": ["side eye.png"],
+    "mouthOpenCat": ["laugh and point .jpg"],
+    "huhCat": ["huh.png"],
+    "danceCat": ["two palms up.mov"],
     "spinCat": ["spin cat.mov"],
 }
 
 # gestures whose meme is a video, not a still image
-VIDEO_GESTURES = {"spinCat"}
+VIDEO_GESTURES = {"spinCat", "danceCat"}
 
 STABLE_FRAMES_REQUIRED = 5
 DEFAULT_FALLBACK_MS = 600
@@ -76,6 +92,37 @@ FACE_STALE_MS = 1200
 # side-eye look. Watch the live "yaw" readout in the Camera window while
 # turning your head to find the right value for you.
 SIDE_EYE_YAW_DEG = 15.0
+
+# same idea, but for tilting the head DOWN (pitch) instead of turning it
+# sideways (yaw) - "slight side eye" when you look down. Uses the same
+# transformation-matrix approach as yaw (pitch_from_transform_matrix below),
+# NOT tested against real degrees yet the way SIDE_EYE_YAW_DEG was (that one
+# was validated live against the debug HUD's yaw readout) - watch the new
+# "pitch" line on the debug HUD while looking down and adjust this to match.
+SIDE_EYE_DOWN_PITCH_DEG = 12.0
+
+# huh cat: mouth open AND eyes wide (distinct from mouthOpenCat, which is
+# jawOpen alone). Uses the eyeWideLeft/eyeWideRight and jawOpen blendshapes.
+# Real test readings: (jaw=0.05, eye=0.45), (jaw=0.4-0.5, eye=0.05) - a
+# natural "huh" face doesn't reliably max out both blendshapes at once. At
+# 0.03, that last eye=0.05 reading only clears the bar by 0.02 - since the
+# app requires 5 CONSECUTIVE frames above threshold before switching, and
+# blendshape scores jitter frame to frame, that thin a margin likely kept
+# dipping back under and resetting the streak. Lowered further for a real
+# buffer against that jitter.
+# huhCat gets its own jaw threshold instead of sharing
+# MOUTH_OPEN_JAW_THRESHOLD with mouthOpenCat, so tuning this doesn't also
+# make mouthOpenCat (which wasn't broken) trigger too easily.
+EYE_WIDE_THRESHOLD = 0.01
+HUH_JAW_THRESHOLD = 0.03
+
+# danceCat: one open hand near the top of the screen, the other near the
+# bottom - absolute frame position (0.0 = top edge, 1.0 = bottom edge), not
+# relative to your face. Untested against real numbers - watch each hand's
+# y position (not currently on the debug HUD; add one if this needs tuning)
+# and adjust these zones if they feel too tight/loose.
+DANCE_TOP_ZONE_Y = 0.35
+DANCE_BOTTOM_ZONE_Y = 0.65
 
 # spin detection: full-frame optical flow, downsized for speed. We compute
 # magnitude (how much of the frame moved, on average) each frame; coherence
@@ -109,7 +156,14 @@ SPIN_FLOW_WIDTH = 160
 SPIN_FLOW_HEIGHT = 90
 SPIN_FLOW_NOISE_FLOOR_PX = 0.4  # per-pixel motion below this is treated as noise, not real motion
 SPIN_FLOW_MIN_MOVING_FRACTION = 0.15  # need at least this much of the frame moving to trust coherence at all
-SPIN_MAG_THRESHOLD = 0.8  # per-frame magnitude counted as "elevated" for the fraction test
+SPIN_MAG_THRESHOLD = 0.65  # per-frame magnitude counted as "elevated" for the fraction test
+# ^ was 0.8 - real recorded data from a genuine spin attempt (flow_debug_log.csv)
+# showed a classic wind-up/sustain/wind-down curve with magnitude sitting in the
+# 1.0-1.7 band for over a second, but its fraction still capped at 0.52 (just
+# under the 0.55 SPIN_FRACTION_REQUIRED below) because 0.8 was too strict a bar
+# for that sustained band to clear often enough. False-positive bursts (quick
+# leans/turns) spike much higher (3+), so lowering this doesn't stop those from
+# still triggering too - that's a separate problem, not fixed by this change.
 SPIN_FRACTION_WINDOW_MS = 2200  # trailing window the fraction is measured over
 SPIN_FRACTION_REQUIRED = 0.55  # fraction of that window that must be elevated to count as spinning
 SPIN_FLOW_PEAK_HOLD_MS = 2000
@@ -121,6 +175,20 @@ SPIN_FLOW_PEAK_HOLD_MS = 2000
 # near the face).
 HAND_COVER_FACE_DIST_FACE_LOST = 1.3
 HAND_COVER_FACE_DIST_FACE_SEEN = 0.7
+
+# facial expression thresholds - these read MediaPipe's face blendshapes
+# (output_face_blendshapes=True below), which are pre-computed 0-1 scores
+# per expression from the face model itself, not hand-rolled geometry like
+# the hand gestures above. Only "mouth open" has a meme wired up so far
+# (memes/laugh and point .jpg fit it well and was already sitting unused).
+# smileScore/browRaiseScore/winkScore are already being read and shown on
+# the debug HUD - once you've got images that fit them, add a check for
+# each in GestureState.decide() the same way MOUTH_OPEN_JAW_THRESHOLD is
+# used below, and add the gesture name -> meme file(s) to GESTURE_MEMES.
+MOUTH_OPEN_JAW_THRESHOLD = 0.5   # jawOpen score; watch the debug HUD while opening your mouth to tune
+SMILE_THRESHOLD = 0.6            # max(mouthSmileLeft, mouthSmileRight)
+BROW_RAISE_THRESHOLD = 0.5       # browInnerUp
+WINK_THRESHOLD = 0.5             # one eye's blink score high, the other's low - see wink_score()
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -155,6 +223,32 @@ def finger_extended(pts, mcp, pip, tip):
     return angle_deg(v1, v2) < 45
 
 
+def blendshape_scores(face_result):
+    """Pull MediaPipe's face blendshapes into a plain {name: score} dict.
+    Returns {} if blendshapes weren't returned this frame (no face, or the
+    option wasn't enabled)."""
+    if not face_result.face_blendshapes:
+        return {}
+    return {b.category_name: b.score for b in face_result.face_blendshapes[0]}
+
+
+def wink_score(scores):
+    """One eye closed, the other open - the absolute gap between the two
+    blink scores, only counted once at least one eye is clearly closing
+    (otherwise two half-lowered eyes would also read as a 'gap')."""
+    left, right = scores.get("eyeBlinkLeft", 0.0), scores.get("eyeBlinkRight", 0.0)
+    if max(left, right) < WINK_THRESHOLD:
+        return 0.0
+    return abs(left - right)
+
+
+def eye_wide_score(scores):
+    """max(eyeWideLeft, eyeWideRight) - how wide the eyes are open, for
+    huhCat (mouth open AND eyes wide, distinct from mouthOpenCat which is
+    mouth-open alone)."""
+    return max(scores.get("eyeWideLeft", 0.0), scores.get("eyeWideRight", 0.0))
+
+
 def yaw_from_transform_matrix(matrix):
     """Extract the head's left/right turn angle (yaw, degrees) from
     MediaPipe's facial transformation matrix - its own estimate of head
@@ -166,6 +260,19 @@ def yaw_from_transform_matrix(matrix):
         return 0.0
     yaw = math.atan2(-r[2, 0], sy)
     return math.degrees(yaw)
+
+
+def pitch_from_transform_matrix(matrix):
+    """Extract the head's up/down tilt angle (pitch, degrees) from the same
+    transformation matrix as yaw above, using the analogous formula for the
+    other axis of the same rotation matrix. Unlike SIDE_EYE_YAW_DEG, this
+    hasn't been validated against real degrees by watching someone actually
+    turn - watch the new 'pitch' line on the debug HUD while looking down
+    to confirm the sign is right (should go positive) and find your real
+    threshold, the same way yaw was originally tuned."""
+    r = np.asarray(matrix)[:3, :3]
+    pitch = math.atan2(r[2, 1], r[2, 2])
+    return math.degrees(pitch)
 
 
 def classify_hand(landmarks):
@@ -246,6 +353,13 @@ class GestureState:
         self.last_flow_score_debug = 0.0
         self.last_flow_peak_debug = 0.0
         self.last_flow_fraction_debug = 0.0
+        self.last_blendshapes = {}  # {category_name: score}, refreshed whenever a face is seen
+        self.last_jaw_open_debug = 0.0
+        self.last_smile_debug = 0.0
+        self.last_brow_raise_debug = 0.0
+        self.last_wink_debug = 0.0
+        self.last_eye_wide_debug = 0.0
+        self.last_pitch_debug = 0.0
 
     def update_flow(self, magnitude, coherence):
         now = time.time() * 1000
@@ -287,11 +401,25 @@ class GestureState:
             mouth_open = dist(upper_lip, lower_lip) / face_width
 
             yaw_deg = 0.0
+            pitch_deg = 0.0
             if face_result.facial_transformation_matrixes:
-                yaw_deg = yaw_from_transform_matrix(face_result.facial_transformation_matrixes[0])
+                matrix = face_result.facial_transformation_matrixes[0]
+                yaw_deg = yaw_from_transform_matrix(matrix)
+                pitch_deg = pitch_from_transform_matrix(matrix)
 
             self.last_face = (mouth_center, face_width, mouth_open, yaw_deg, now)
             self.last_yaw_debug = yaw_deg
+            self.last_pitch_debug = pitch_deg
+
+            self.last_blendshapes = blendshape_scores(face_result)
+            self.last_jaw_open_debug = self.last_blendshapes.get("jawOpen", 0.0)
+            self.last_smile_debug = max(
+                self.last_blendshapes.get("mouthSmileLeft", 0.0),
+                self.last_blendshapes.get("mouthSmileRight", 0.0),
+            )
+            self.last_brow_raise_debug = self.last_blendshapes.get("browInnerUp", 0.0)
+            self.last_wink_debug = wink_score(self.last_blendshapes)
+            self.last_eye_wide_debug = eye_wide_score(self.last_blendshapes)
         self.face_seen_this_frame = saw_face
 
     def decide(self, hand_result):
@@ -303,11 +431,32 @@ class GestureState:
             return "spinCat"
 
         if not hand_result.hand_landmarks:
-            # no hands: side-eye is a face-only pose (head turned, no
-            # particular hand shape needed).
+            # no hands: side-eye and huh are both face-only poses, and
+            # BOTH require no hands visible - mouthOpenCat moved out of
+            # this branch entirely (see below), specifically so it can
+            # never clash with huhCat: huhCat needs mouth-open with no
+            # hand, mouthOpenCat now needs mouth-open WITH a hand. They're
+            # mutually exclusive by construction, not by priority-ordering.
+            if (
+                face_is_fresh
+                and self.last_jaw_open_debug > HUH_JAW_THRESHOLD
+                and self.last_eye_wide_debug > EYE_WIDE_THRESHOLD
+            ):
+                return "huhCat"
             if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
                 return "sideEyeCat"
+            if face_is_fresh and self.last_pitch_debug > SIDE_EYE_DOWN_PITCH_DEG:
+                return "sideEyeDownCat"
             return "default"
+
+        # mouthOpenCat: mouth open AND a hand visible somewhere in frame -
+        # any hand shape counts, this isn't about what the hand is doing,
+        # just that one's present. Checked before the hand-shape-specific
+        # branches below so an open mouth with a hand up (eating, talking
+        # with your hands, etc.) reads as this rather than whatever shape
+        # the hand happens to be making.
+        if face_is_fresh and self.last_jaw_open_debug > MOUTH_OPEN_JAW_THRESHOLD:
+            return "mouthOpenCat"
 
         hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
 
@@ -328,7 +477,28 @@ class GestureState:
                     both_above_head = all(h["palmCenter"][1] < head_top_y for h in hands)
                     if both_above_head:
                         return "twoHandsOnHead"
-                    return "crashOutCat"
+                    # crashOutCat requires both hands to actually be
+                    # clenched fists - an open hand near the face falls
+                    # through instead of getting swallowed by this.
+                    both_fists = all(h["curledCount"] == 4 for h in hands)
+                    if both_fists:
+                        return "crashOutCat"
+
+            # danceCat: both hands showing open palms (fingers spread - the
+            # practical proxy for "palm facing camera", since MediaPipe
+            # doesn't give hand orientation directly), with one hand near
+            # the TOP of the screen and the other near the BOTTOM -
+            # absolute frame position, not relative to your face, and it
+            # doesn't matter which hand is on top. Untested against real
+            # numbers - watch each hand's y position and adjust
+            # DANCE_TOP_ZONE_Y/DANCE_BOTTOM_ZONE_Y if the zones feel wrong.
+            both_open = all(h["curledCount"] == 0 for h in hands)
+            if both_open:
+                ys = sorted(h["palmCenter"][1] for h in hands)
+                one_near_top = ys[0] < DANCE_TOP_ZONE_Y
+                one_near_bottom = ys[1] > DANCE_BOTTOM_ZONE_Y
+                if one_near_top and one_near_bottom:
+                    return "danceCat"
 
         h = hands[0]
 
@@ -401,6 +571,11 @@ def draw_debug_hud(frame, state, gesture):
         f"flow mag: {state.last_flow_magnitude_debug:.2f}  (thr {SPIN_MAG_THRESHOLD:.2f})",
         f"spin fraction (2.2s window): {state.last_flow_fraction_debug:.2f}  (thr {SPIN_FRACTION_REQUIRED:.2f})",
         f"peak score (last 2s): {state.last_flow_peak_debug:.2f}  <- read this AFTER you stop spinning",
+        f"jawOpen: {state.last_jaw_open_debug:.2f}  eyeWide: {state.last_eye_wide_debug:.2f}  "
+        f"(huh needs both > {HUH_JAW_THRESHOLD:.2f}/{EYE_WIDE_THRESHOLD:.2f})",
+        f"smile: {state.last_smile_debug:.2f}  browRaise: {state.last_brow_raise_debug:.2f}  "
+        f"wink: {state.last_wink_debug:.2f}  <- not wired to a meme yet",
+        f"pitch: {state.last_pitch_debug:+.1f} deg  (side-eye-down thr {SIDE_EYE_DOWN_PITCH_DEG:.1f}, unvalidated - watch this while looking down)",
     ]
     for i, line in enumerate(lines):
         y = 24 + i * 22
@@ -438,6 +613,7 @@ def main():
             running_mode=RunningMode.VIDEO,
             num_faces=1,
             output_facial_transformation_matrixes=True,
+            output_face_blendshapes=True,
         )
     )
 
@@ -450,37 +626,24 @@ def main():
     flow_log = open(flow_log_path, "w", buffering=1)  # line-buffered so data survives a hard kill
     flow_log.write("t_ms,magnitude,coherence,score,fraction,peak_2s,gesture\n")
 
-    # load every frame of the spin video into memory once, up front, instead
-    # of re-seeking the file with cv2.CAP_PROP_POS_FRAMES each time the
-    # gesture retriggers. Frame-accurate seeking on .mov files is unreliable
-    # on macOS (can silently fail or return the wrong frame) - for a clip
-    # this short (a couple seconds), just holding every frame in memory and
-    # stepping through a plain list sidesteps that entirely.
-    spin_video_path = MEMES / GESTURE_MEMES["spinCat"][0]
-    _spin_cap = cv2.VideoCapture(str(spin_video_path))
-    if not _spin_cap.isOpened():
-        raise FileNotFoundError(f"missing meme file: {spin_video_path}")
-    spin_frames = []
-    while True:
-        ok, vframe = _spin_cap.read()
+    # one VideoCapture per video gesture, keyed by gesture name - generic so
+    # any gesture added to VIDEO_GESTURES gets playback/looping for free
+    # without new code here.
+    video_caps = {}
+    for video_gesture in VIDEO_GESTURES:
+        video_path = MEMES / GESTURE_MEMES[video_gesture][0]
+        cap_for_gesture = cv2.VideoCapture(str(video_path))
+        if not cap_for_gesture.isOpened():
+            raise FileNotFoundError(f"missing meme file: {video_path}")
+        video_caps[video_gesture] = cap_for_gesture
+
+    def next_video_frame(gesture_name):
+        vcap = video_caps[gesture_name]
+        ok, vframe = vcap.read()
         if not ok:
-            break
-        spin_frames.append(vframe)
-    _spin_cap.release()
-    if not spin_frames:
-        raise RuntimeError(f"could not decode any frames from: {spin_video_path}")
-
-    spin_frame_index = 0
-
-    def next_spin_frame():
-        nonlocal spin_frame_index
-        vframe = spin_frames[spin_frame_index % len(spin_frames)]
-        spin_frame_index += 1
+            vcap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, vframe = vcap.read()
         return vframe
-
-    def reset_spin_playback():
-        nonlocal spin_frame_index
-        spin_frame_index = 0
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -536,8 +699,8 @@ def main():
                 current_gesture = gesture
                 if gesture not in VIDEO_GESTURES:
                     current_meme = random.choice(memes[gesture])
-                elif gesture == "spinCat":
-                    reset_spin_playback()
+                else:
+                    video_caps[gesture].set(cv2.CAP_PROP_POS_FRAMES, 0)
 
             if gesture != "default":
                 last_non_default_at = now
@@ -548,8 +711,13 @@ def main():
             draw_landmarks(frame, hand_result)
             draw_debug_hud(frame, state, current_gesture)
 
-            if current_gesture == "spinCat":
-                meme_view = fit_to_height(next_spin_frame(), frame.shape[0])
+            if current_gesture in VIDEO_GESTURES:
+                vframe = next_video_frame(current_gesture)
+                meme_view = (
+                    fit_to_height(vframe, frame.shape[0])
+                    if vframe is not None
+                    else fit_to_height(current_meme, frame.shape[0])
+                )
             else:
                 meme_view = fit_to_height(current_meme, frame.shape[0])
             cv2.imshow("Camera", frame)
@@ -560,6 +728,8 @@ def main():
                 break
     finally:
         cap.release()
+        for vcap in video_caps.values():
+            vcap.release()
         flow_log.close()
         cv2.destroyAllWindows()
         hand_landmarker.close()
