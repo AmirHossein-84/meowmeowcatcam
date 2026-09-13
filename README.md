@@ -107,4 +107,27 @@ python scripts/download_models.py --check-only
 
 CI (`.github/workflows/ci.yml`) runs pytest + ruff + `node --check` on Python 3.11–3.13 × Ubuntu/Windows, plus non-blocking `pip-audit` and Dependabot.
 
+## Android app (Capacitor wrapper, 11 browser gestures)
+
+The browser build (`index.html` + `app.js` + `memes/`) is wrapped with
+[Capacitor](https://capacitorjs.com) as `com.meowmeowcatcam.app`.
+Needs internet on first launch (MediaPipe code/models load from CDN).
+
+- GitHub Actions (`.github/workflows/android.yml`) builds a sideloadable
+  **debug APK** on every push to `main`/`master`, PR, or manual dispatch.
+  Download it from the run's `app-debug` artifact and install with
+  `adb install app-debug.apk` (enable "Install unknown apps" first).
+- Local build: needs Node 20+ and JDK 17 (Gradle 8.2.1 can't run on JDK 21):
+
+```bash
+npm ci
+npm run build:android   # copies web assets to www/ and runs `cap sync`
+cd android && ./gradlew assembleDebug   # APK at app/build/outputs/apk/debug/
+```
+
+`scripts/copy-www.js` is the source of truth for what goes into `www/`;
+never edit `www/` or `android/app/src/main/assets/` by hand.
+Camera permission (`android.permission.CAMERA`) is declared in
+`android/app/src/main/AndroidManifest.xml`.
+
 Uninstall: delete `.venv/`; nothing else is installed (no autostart, no background processes).

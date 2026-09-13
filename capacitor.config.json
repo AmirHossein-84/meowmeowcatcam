@@ -1,0 +1,13 @@
+{
+  "appId": "com.meowmeowcatcam.app",
+  "appName": "MeowMeowCatCam",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 0
+    }
+  }
+}

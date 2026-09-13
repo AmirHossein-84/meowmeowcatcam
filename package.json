@@ -1,0 +1,20 @@
+{
+  "name": "meowmeowcatcam",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Webcam gesture -> cat meme detector (Capacitor Android wrapper)",
+  "type": "module",
+  "scripts": {
+    "copy:assets": "node scripts/copy-www.js",
+    "build:android": "npm run copy:assets && npx cap sync android",
+    "cap:sync": "npm run copy:assets && npx cap sync",
+    "cap:open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}

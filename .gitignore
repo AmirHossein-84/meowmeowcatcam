@@ -6,3 +6,12 @@ flow_debug_log.csv
 flow_debug_log.csv.1
 .pytest_cache/
 .ruff_cache/
+
+# Node / Capacitor
+node_modules/
+www/
+npm-debug.log*
+gradle-build.log
+android/app/build/
+android/.gradle/
+android/local.properties
