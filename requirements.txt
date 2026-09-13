@@ -1,3 +1,9 @@
-mediapipe==1.0.0
-numpy==2.5.1
-opencv-contrib-python==5.0.0.93
+# runtime only. opencv-python (not -contrib): only resize/cvtColor/
+# calcOpticalFlowFarneback/imread/imshow/VideoCapture are used — all in main package.
+# mediapipe floor 0.10.14 matches the tasks-vision @0.10.14 pinned in app.js.
+# numpy capped <2: mediapipe 1.0.0 predates the numpy 2.x ABI and breaks on 2.x;
+# the old pin (mediapipe==1.0.0 + numpy==2.5.1) is a known-bad combo — do not restore.
+# Requires Python >=3.11. Tested matrix: 3.11/3.12/3.13 x Windows/macOS/Linux.
+opencv-python>=4.8,<5
+numpy>=1.26,<2
+mediapipe>=0.10.14,<0.11

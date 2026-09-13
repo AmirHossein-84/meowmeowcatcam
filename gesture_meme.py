@@ -12,18 +12,21 @@ Gestures:
   fist / punch      -> memes/punchcat.jpg
   shhh              -> memes/shhcat.jpg
   two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
-                                                        memes/fingers together muehehe .jpg
-  hand covering face -> memes/hand cover face .jpg
-  crash-out cat (two CLENCHED FISTS up beside the face)   -> memes/crashout cat .jpg
-  two hands on head                                        -> memes/two hands on head .jpg
-  dance cat (two open palms, one near top of screen, one near bottom)  -> memes/two palms up.mov (video)
-  hand stretched out, palm facing camera (open hand)       -> memes/hand stretched out, palm facing up .jpg
-  side eye (head turned to the side)                       -> memes/side eye cat.jpg
-  slight side eye (head tilted DOWN, not turned)            -> memes/side eye.png
-  mouth wide open, WITH a hand visible somewhere in frame  -> memes/laugh and point .jpg
+                                                        memes/fingers-together-muehehe.jpg
+  hand covering face -> memes/hand-cover-face.jpg
+  crash-out cat (two CLENCHED FISTS up beside the face)   -> memes/crashout-cat.jpg
+  two hands on head                                        -> memes/two-hands-on-head.jpg
+  dance cat (two open palms, one near top of screen, one near bottom)  -> memes/two-palms-up.mov (video)
+  hand stretched out, palm facing camera (open hand)       -> memes/hand-stretched-out-palm-up.jpg
+  side eye (head turned to the side)                       -> memes/side-eye-cat.jpg
+  slight side eye (head tilted DOWN, not turned)            -> memes/side-eye-down.png
+  mouth wide open, WITH a hand visible somewhere in frame  -> memes/laugh-and-point.jpg
   huh cat (mouth open AND eyes wide, no hands)               -> memes/huh.png
-  shrug cat (both hands up and out to the sides)             -> memes/iunno cat.jpg
-  spin cat (spinning fast in your chair)                   -> memes/spin cat.mov (plays as a video)
+  shrug cat (both hands up and out to the sides)             -> memes/iunno-cat.jpg (reserved, not wired yet)
+  spin cat (spinning fast in your chair)                   -> memes/spin-cat.mov (plays as a video)
+
+Browser build (app.js) implements an 11-gesture scoped subset; sideEyeDownCat,
+mouthOpenCat, huhCat, danceCat and spinCat are desktop-only — see gestures.json.
 
 Facial expressions (mouth-open above) use MediaPipe's face blendshapes -
 pre-computed expression scores (0-1) that come from the same face model,
@@ -42,11 +45,13 @@ Press q or ESC to quit.
 
 import math
 import random
+import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
+from mediapipe import Image, ImageFormat
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import (
     FaceLandmarker,
@@ -55,7 +60,6 @@ from mediapipe.tasks.python.vision import (
     HandLandmarkerOptions,
     RunningMode,
 )
-from mediapipe import Image, ImageFormat
 
 ROOT = Path(__file__).parent
 MODELS = ROOT / "models"
@@ -67,17 +71,17 @@ GESTURE_MEMES = {
     "oneFingerUp": ["profcat.jpg", "professorcat.jpg"],
     "fist": ["punchcat.jpg"],
     "shhh": ["shhcat.jpg"],
-    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],
-    "handCoverFace": ["hand cover face .jpg"],
-    "crashOutCat": ["crashout cat .jpg"],
-    "twoHandsOnHead": ["two hands on head .jpg"],
-    "handStretchedOut": ["hand stretched out, palm facing up .jpg"],
-    "sideEyeCat": ["side eye cat.jpg"],
-    "sideEyeDownCat": ["side eye.png"],
-    "mouthOpenCat": ["laugh and point .jpg"],
+    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers-together-muehehe.jpg"],
+    "handCoverFace": ["hand-cover-face.jpg"],
+    "crashOutCat": ["crashout-cat.jpg"],
+    "twoHandsOnHead": ["two-hands-on-head.jpg"],
+    "handStretchedOut": ["hand-stretched-out-palm-up.jpg"],
+    "sideEyeCat": ["side-eye-cat.jpg"],
+    "sideEyeDownCat": ["side-eye-down.png"],
+    "mouthOpenCat": ["laugh-and-point.jpg"],
     "huhCat": ["huh.png"],
-    "danceCat": ["two palms up.mov"],
-    "spinCat": ["spin cat.mov"],
+    "danceCat": ["two-palms-up.mov"],
+    "spinCat": ["spin-cat.mov"],
 }
 
 # gestures whose meme is a video, not a still image
@@ -86,6 +90,9 @@ VIDEO_GESTURES = {"spinCat", "danceCat"}
 STABLE_FRAMES_REQUIRED = 5
 DEFAULT_FALLBACK_MS = 600
 FACE_STALE_MS = 1200
+LOG_MAX_BYTES = 5 * 1024 * 1024
+VIDEO_PRELOAD_CAP = 300
+MAX_CAM_READ_FAILURES = 30
 
 # how far the head has to turn (yaw, in degrees, from MediaPipe's own head
 # pose estimate - not a hand-rolled distance heuristic) to count as a
@@ -341,9 +348,16 @@ def frame_flow_signal(frame, prev_small_gray):
     return magnitude, coherence, small
 
 
+def now_ms():
+    """Monotonic milliseconds for all control logic (debounce, stale-face,
+    spin windows). Immune to NTP/wall-clock jumps (see flow_debug_log
+    future-epoch timestamps)."""
+    return time.monotonic() * 1000.0
+
+
 class GestureState:
     def __init__(self):
-        self.last_face = None  # (mouth_center, face_width, mouth_open, yaw_deg, t)
+        self.last_face = None  # (mouth_center, face_width, mouth_open, yaw_deg, t_monotonic_ms)
         self.face_seen_this_frame = False
         self.last_yaw_debug = 0.0
         self.flow_history = []  # [(t, magnitude), ...] trailing samples, for the fraction-above trigger
@@ -361,8 +375,8 @@ class GestureState:
         self.last_eye_wide_debug = 0.0
         self.last_pitch_debug = 0.0
 
-    def update_flow(self, magnitude, coherence):
-        now = time.time() * 1000
+    def update_flow(self, magnitude, coherence, now=None):
+        now = now if now is not None else time.monotonic() * 1000.0
         score = magnitude * coherence  # kept for the debug HUD/log only, not the trigger
 
         self.flow_history.append((now, magnitude))
@@ -380,7 +394,8 @@ class GestureState:
         elevated = sum(1 for _, m in self.flow_history if m > SPIN_MAG_THRESHOLD)
         self.last_flow_fraction_debug = elevated / len(self.flow_history) if self.flow_history else 0.0
 
-    def is_spinning(self, now):
+    def is_spinning(self, now=None):
+        now = now if now is not None else time.monotonic() * 1000.0
         self.flow_history = [(t, m) for t, m in self.flow_history if now - t < SPIN_FRACTION_WINDOW_MS]
         if not self.flow_history:
             return False
@@ -388,8 +403,8 @@ class GestureState:
         fraction = elevated / len(self.flow_history)
         return fraction > SPIN_FRACTION_REQUIRED
 
-    def update_face(self, face_result):
-        now = time.time() * 1000
+    def update_face(self, face_result, now=None):
+        now = now if now is not None else time.monotonic() * 1000.0
         saw_face = bool(face_result.face_landmarks)
 
         if saw_face:
@@ -422,8 +437,8 @@ class GestureState:
             self.last_eye_wide_debug = eye_wide_score(self.last_blendshapes)
         self.face_seen_this_frame = saw_face
 
-    def decide(self, hand_result):
-        now = time.time() * 1000
+    def decide(self, hand_result, now=None):
+        now = now if now is not None else time.monotonic() * 1000.0
         face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
 
         # spinning in the chair beats everything else, hands included.
@@ -548,6 +563,162 @@ class GestureState:
         return "default"
 
 
+def validate_assets():
+    """Fail fast before MediaPipe allocates native handles."""
+    missing = []
+    for model in (MODELS / "hand_landmarker.task", MODELS / "face_landmarker.task"):
+        if not model.is_file():
+            missing.append(str(model))
+    for gesture, files in GESTURE_MEMES.items():
+        for name in files:
+            p = MEMES / name
+            if not p.is_file():
+                missing.append(f"{gesture}: {p}")
+    if missing:
+        raise FileNotFoundError("missing asset file(s):\n" + "\n".join(missing))
+
+
+def open_flow_log(path=None, max_bytes=LOG_MAX_BYTES):
+    """Append (never truncate); rotate if >max_bytes. Line-buffered."""
+    log_path = path or (ROOT / "flow_debug_log.csv")
+    if log_path.exists() and log_path.stat().st_size > max_bytes:
+        backup = log_path.with_name(log_path.name + ".1")
+        try:
+            if backup.exists():
+                backup.unlink()
+            log_path.rename(backup)
+        except OSError:
+            pass
+    is_new = (not log_path.exists()) or log_path.stat().st_size == 0
+    f = open(log_path, "a", buffering=1)  # noqa: SIM115 - kept open for whole run, closed in finally
+    if is_new:
+        f.write("wall_ms,t_monotonic_ms,magnitude,coherence,score,fraction,peak_2s,gesture\n")
+    return f
+
+
+class VideoLoop:
+    """Capped-RAM video loop. Never uses CAP_PROP_POS_FRAMES seeking
+    (unreliable for .mov on macOS, see fix a7e671a): short clips are
+    preloaded and looped in RAM; longer clips stream with reopen-on-EOS."""
+
+    def __init__(self, path, cap_frames=VIDEO_PRELOAD_CAP):
+        self.path = str(path)
+        self.idx = 0
+        self.frames = []
+        self.streaming = False
+        self.cap = None
+        tmp = cv2.VideoCapture(self.path)
+        if not tmp.isOpened():
+            raise FileNotFoundError(f"missing meme file: {path}")
+        for _ in range(cap_frames):
+            ok, f = tmp.read()
+            if not ok:
+                break
+            self.frames.append(f)
+        if not self.frames:
+            tmp.release()
+            raise FileNotFoundError(f"missing meme file: {path}")
+        ok, _ = tmp.read()
+        tmp.release()
+        if ok:
+            self.streaming = True
+            self.cap = cv2.VideoCapture(self.path)
+
+    def reset(self):
+        self.idx = 0
+        if self.streaming:
+            if self.cap is not None:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(self.path)
+
+    def next_frame(self):
+        if not self.streaming:
+            f = self.frames[self.idx % len(self.frames)]
+            self.idx += 1
+            return f
+        ok, f = self.cap.read()
+        if not ok:  # EOS: reopen instead of seek
+            self.cap.release()
+            self.cap = cv2.VideoCapture(self.path)
+            ok, f = self.cap.read()
+            if not ok:
+                return None
+        return f
+
+    def release(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+
+def get_resized_meme(memes, gesture, variant_idx, target_h, cache):
+    key = (gesture, variant_idx, int(target_h))
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    resized = fit_to_height(memes[gesture][variant_idx], int(target_h))
+    for k in [k for k in cache if k[0] == gesture and k[1] == variant_idx and k[2] != key[2]]:
+        del cache[k]
+    cache[key] = resized
+    return resized
+
+
+def open_webcam(indices=(0, 1)):
+    last_err = None
+    for i in indices:
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            if ok:
+                return cap, i
+            cap.release()
+            last_err = f"index {i} opened but returned no frames"
+        else:
+            last_err = f"index {i} could not be opened"
+    print(
+        f"ERROR: Could not open webcam ({last_err}). "
+        "Check OS camera permissions, close Zoom/OBS/Teams, or try a different camera.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+HELP_LINES = [
+    "q/ESC quit | H hud | ? help",
+    "rockstar, 1-finger, fist, shhh",
+    "2-fing-touch, cover-face, crashout (2 fists)",
+    "hands-on-head, dance (palms top+bottom)",
+    "palm-out, side-eye (yaw), side-eye-down (pitch)",
+    "mouth+hand=laugh, mouth+wide-eyes=huh, spin",
+]
+
+
+def draw_help_overlay(frame):
+    x0, y0, w = 10, 10, 560
+    h = 24 + len(HELP_LINES) * 22
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + w, y0 + h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+    for i, line in enumerate(HELP_LINES):
+        cv2.putText(frame, line, (x0 + 10, y0 + 26 + i * 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 120), 1, cv2.LINE_AA)
+
+
+def add_meme_caption(view, gesture, filename):
+    label = f"{gesture} - {filename}"
+    y = max(12, view.shape[0] - 12)
+    cv2.putText(view, label, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(view, label, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    return view
+
+
+def safe_imshow(win, img):
+    try:
+        cv2.imshow(win, img)
+    except cv2.error:
+        pass
+
+
 def load_memes():
     cache = {}
     for gesture, files in GESTURE_MEMES.items():
@@ -571,10 +742,14 @@ def draw_debug_hud(frame, state, gesture):
         f"flow mag: {state.last_flow_magnitude_debug:.2f}  (thr {SPIN_MAG_THRESHOLD:.2f})",
         f"spin fraction (2.2s window): {state.last_flow_fraction_debug:.2f}  (thr {SPIN_FRACTION_REQUIRED:.2f})",
         f"peak score (last 2s): {state.last_flow_peak_debug:.2f}  <- read this AFTER you stop spinning",
-        f"jawOpen: {state.last_jaw_open_debug:.2f}  eyeWide: {state.last_eye_wide_debug:.2f}  "
-        f"(huh needs both > {HUH_JAW_THRESHOLD:.2f}/{EYE_WIDE_THRESHOLD:.2f})",
-        f"smile: {state.last_smile_debug:.2f}  browRaise: {state.last_brow_raise_debug:.2f}  "
-        f"wink: {state.last_wink_debug:.2f}  <- not wired to a meme yet",
+        (
+            f"jawOpen: {state.last_jaw_open_debug:.2f}  eyeWide: {state.last_eye_wide_debug:.2f}  "
+            f"(huh needs both > {HUH_JAW_THRESHOLD:.2f}/{EYE_WIDE_THRESHOLD:.2f})"
+        ),
+        (
+            f"smile: {state.last_smile_debug:.2f}  browRaise: {state.last_brow_raise_debug:.2f}  "
+            f"wink: {state.last_wink_debug:.2f}  <- not wired to a meme yet"
+        ),
         f"pitch: {state.last_pitch_debug:+.1f} deg  (side-eye-down thr {SIDE_EYE_DOWN_PITCH_DEG:.1f}, unvalidated - watch this while looking down)",
     ]
     for i, line in enumerate(lines):
@@ -594,60 +769,74 @@ def draw_landmarks(frame, hand_result):
 
 
 def fit_to_height(img, height):
-    h, w = img.shape[:2]
-    scale = height / h
-    return cv2.resize(img, (int(w * scale), height))
+    if img is None:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    try:
+        h, w = img.shape[:2]
+    except (AttributeError, ValueError, TypeError):
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    if h <= 0 or w <= 0:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    try:
+        height = int(height)
+    except (ValueError, TypeError):
+        height = 1
+    height = max(1, height)
+    scale = height / max(1, h)
+    new_w = max(1, int(w * scale))
+    return cv2.resize(img, (new_w, height))
 
 
 def main():
-    hand_landmarker = HandLandmarker.create_from_options(
-        HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(MODELS / "hand_landmarker.task")),
-            running_mode=RunningMode.VIDEO,
-            num_hands=2,
+    validate_assets()
+    try:
+        hand_landmarker = HandLandmarker.create_from_options(
+            HandLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(MODELS / "hand_landmarker.task")),
+                running_mode=RunningMode.VIDEO,
+                num_hands=2,
+            )
         )
-    )
-    face_landmarker = FaceLandmarker.create_from_options(
-        FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(MODELS / "face_landmarker.task")),
-            running_mode=RunningMode.VIDEO,
-            num_faces=1,
-            output_facial_transformation_matrixes=True,
-            output_face_blendshapes=True,
+    except Exception as e:  # noqa: BLE001 - MediaPipe raises varied runtime errors here
+        print(f"ERROR: Could not load hand model ({MODELS / 'hand_landmarker.task'}): {e}", file=sys.stderr)
+        print("Run scripts/download_models.py or re-install release assets.", file=sys.stderr)
+        sys.exit(4)
+    try:
+        face_landmarker = FaceLandmarker.create_from_options(
+            FaceLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(MODELS / "face_landmarker.task")),
+                running_mode=RunningMode.VIDEO,
+                num_faces=1,
+                output_facial_transformation_matrixes=True,
+                output_face_blendshapes=True,
+            )
         )
-    )
+    except Exception as e:  # noqa: BLE001 - MediaPipe raises varied runtime errors here
+        print(f"ERROR: Could not load face model ({MODELS / 'face_landmarker.task'}): {e}", file=sys.stderr)
+        sys.exit(4)
 
     memes = load_memes()
 
     # every frame's flow numbers get logged here, timestamped - so we can
     # look at exactly what a real, full-effort spin looked like afterward
-    # instead of trying to read a jittery number while dizzy.
-    flow_log_path = ROOT / "flow_debug_log.csv"
-    flow_log = open(flow_log_path, "w", buffering=1)  # line-buffered so data survives a hard kill
-    flow_log.write("t_ms,magnitude,coherence,score,fraction,peak_2s,gesture\n")
+    # instead of trying to read a jittery number while dizzy. Appended,
+    # rotated at 5MB - never truncated.
+    flow_log = open_flow_log()
 
-    # one VideoCapture per video gesture, keyed by gesture name - generic so
-    # any gesture added to VIDEO_GESTURES gets playback/looping for free
-    # without new code here.
-    video_caps = {}
+    # one VideoLoop per video gesture - capped preload, reopen-on-EOS
+    # (never CAP_PROP_POS_FRAMES seeking: unreliable on macOS .mov).
+    video_loops = {}
     for video_gesture in VIDEO_GESTURES:
-        video_path = MEMES / GESTURE_MEMES[video_gesture][0]
-        cap_for_gesture = cv2.VideoCapture(str(video_path))
-        if not cap_for_gesture.isOpened():
-            raise FileNotFoundError(f"missing meme file: {video_path}")
-        video_caps[video_gesture] = cap_for_gesture
+        try:
+            video_loops[video_gesture] = VideoLoop(MEMES / GESTURE_MEMES[video_gesture][0])
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(4)
 
     def next_video_frame(gesture_name):
-        vcap = video_caps[gesture_name]
-        ok, vframe = vcap.read()
-        if not ok:
-            vcap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, vframe = vcap.read()
-        return vframe
+        return video_loops[gesture_name].next_frame()
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise RuntimeError("Could not open webcam (index 0)")
+    cap, cam_idx = open_webcam((0, 1))
 
     cv2.namedWindow("Camera")
     cv2.namedWindow("Meme")
@@ -658,37 +847,49 @@ def main():
     current_gesture = "default"
     candidate_gesture = "default"
     candidate_streak = 0
-    last_non_default_at = time.time() * 1000
-    current_meme = random.choice(memes["default"])
+    last_non_default_at = now_ms()
+    resized_cache = {}
+    current_variant = random.randrange(len(memes["default"]))
+    current_meme_name = GESTURE_MEMES["default"][current_variant]
     prev_flow_gray = None
+    read_failures = 0
+    show_hud = True
+    show_help = False
 
-    start_time = time.time()
+    frame_index = 0  # strictly increasing MediaPipe timestamp
     try:
         while True:
             ok, frame = cap.read()
-            if not ok:
-                break
+            if not ok or frame is None:
+                read_failures += 1
+                if read_failures >= MAX_CAM_READ_FAILURES:
+                    print(f"ERROR: webcam (index {cam_idx}) failed {read_failures}x, exiting.",
+                          file=sys.stderr)
+                    break
+                continue
+            read_failures = 0
             frame = cv2.flip(frame, 1)  # mirror, like a selfie cam
 
+            mono = now_ms()
             magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)
-            state.update_flow(magnitude, coherence)
+            state.update_flow(magnitude, coherence, now=mono)
             flow_log.write(
-                f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
+                f"{time.time() * 1000:.0f},{mono:.0f},{magnitude:.4f},{coherence:.4f},"
                 f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
                 f"{state.last_flow_peak_debug:.4f},{current_gesture}\n"
             )
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = Image(image_format=ImageFormat.SRGB, data=rgb)
-            ts_ms = int((time.time() - start_time) * 1000)
+            frame_index += 1
+            ts_ms = frame_index
 
             hand_result = hand_landmarker.detect_for_video(mp_image, ts_ms)
             face_result = face_landmarker.detect_for_video(mp_image, ts_ms)
-            state.update_face(face_result)
+            state.update_face(face_result, now=mono)
 
-            gesture = state.decide(hand_result)
+            gesture = state.decide(hand_result, now=mono)
 
-            now = time.time() * 1000
             if gesture == candidate_gesture:
                 candidate_streak += 1
             else:
@@ -698,38 +899,50 @@ def main():
             if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
                 current_gesture = gesture
                 if gesture not in VIDEO_GESTURES:
-                    current_meme = random.choice(memes[gesture])
+                    current_variant = random.randrange(len(memes[gesture]))
+                    current_meme_name = GESTURE_MEMES[gesture][current_variant]
                 else:
-                    video_caps[gesture].set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    video_loops[gesture].reset()
+                    current_meme_name = GESTURE_MEMES[gesture][0]
 
             if gesture != "default":
-                last_non_default_at = now
-            elif now - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
+                last_non_default_at = mono
+            elif mono - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
                 current_gesture = "default"
-                current_meme = random.choice(memes["default"])
+                current_variant = random.randrange(len(memes["default"]))
+                current_meme_name = GESTURE_MEMES["default"][current_variant]
 
             draw_landmarks(frame, hand_result)
-            draw_debug_hud(frame, state, current_gesture)
+            if show_hud:
+                draw_debug_hud(frame, state, current_gesture)
+            if show_help:
+                draw_help_overlay(frame)
 
             if current_gesture in VIDEO_GESTURES:
                 vframe = next_video_frame(current_gesture)
-                meme_view = (
-                    fit_to_height(vframe, frame.shape[0])
-                    if vframe is not None
-                    else fit_to_height(current_meme, frame.shape[0])
-                )
+                if vframe is not None:
+                    meme_view = fit_to_height(vframe, frame.shape[0])
+                else:
+                    meme_view = get_resized_meme(memes, "default", 0, frame.shape[0], resized_cache)
+                    current_gesture = "default"
             else:
-                meme_view = fit_to_height(current_meme, frame.shape[0])
-            cv2.imshow("Camera", frame)
-            cv2.imshow("Meme", meme_view)
+                meme_view = get_resized_meme(memes, current_gesture, current_variant,
+                                             frame.shape[0], resized_cache)
+            meme_view = add_meme_caption(meme_view, current_gesture, current_meme_name)
+            safe_imshow("Camera", frame)
+            safe_imshow("Meme", meme_view)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or key == 27:
                 break
+            elif key in (ord("h"), ord("H")):
+                show_hud = not show_hud
+            elif key in (ord("?"), ord("/")):
+                show_help = not show_help
     finally:
         cap.release()
-        for vcap in video_caps.values():
-            vcap.release()
+        for vloop in video_loops.values():
+            vloop.release()
         flow_log.close()
         cv2.destroyAllWindows()
         hand_landmarker.close()

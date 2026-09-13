@@ -8,6 +8,11 @@ import {
 // Each gesture maps to one or more meme images. When a gesture has more
 // than one image, one is picked at random each time the gesture is newly
 // (re)triggered, so repeated gestures don't always show the same frame.
+//
+// Shared spec lives in gestures.json (16 desktop gestures). Browser uses
+// this 11-entry scoped subset; the 5 desktopOnly gestures
+// (sideEyeDownCat, mouthOpenCat, huhCat, danceCat, spinCat) are documented
+// in the help overlay, not silently mapped.
 const GESTURE_MEMES = {
   rockstar: ["memes/cat.jpg"],
   default: ["memes/pokercat.jpg"],
@@ -17,14 +22,28 @@ const GESTURE_MEMES = {
   twoFingersTogether: [
     "memes/uwucat.jpg",
     "memes/uwucatt.jpg",
-    "memes/fingers together muehehe .jpg",
+    "memes/fingers-together-muehehe.jpg",
   ],
-  handCoverFace: ["memes/hand cover face .jpg"],
-  crashOutCat: ["memes/crashout cat .jpg"],
-  twoHandsOnHead: ["memes/two hands on head .jpg"],
-  handStretchedOut: ["memes/hand stretched out, palm facing up .jpg"],
-  sideEyeCat: ["memes/side eye cat.jpg"],
+  handCoverFace: ["memes/hand-cover-face.jpg"],
+  crashOutCat: ["memes/crashout-cat.jpg"],
+  twoHandsOnHead: ["memes/two-hands-on-head.jpg"],
+  handStretchedOut: ["memes/hand-stretched-out-palm-up.jpg"],
+  sideEyeCat: ["memes/side-eye-cat.jpg"],
 };
+
+const HELP_FALLBACK = [
+  ["rockstar", "Thumb + pinky out"],
+  ["default", "Hands down"],
+  ["oneFingerUp", "Index finger up, away from face"],
+  ["fist", "All four fingers curled"],
+  ["shhh", "Index fingertip on mouth"],
+  ["twoFingersTogether", "Both index fingertips touching"],
+  ["handCoverFace", "Hand where your face just was"],
+  ["crashOutCat", "Both fists up beside face"],
+  ["twoHandsOnHead", "Both hands above head"],
+  ["handStretchedOut", "Open palm held out"],
+  ["sideEyeCat", "Turn head sideways"],
+];
 
 // how many consecutive frames a gesture must hold before we switch to it
 const STABLE_FRAMES_REQUIRED = 5;
@@ -51,6 +70,13 @@ const HAND_COVER_FACE_DIST_FACE_SEEN = 0.7;
 const video = document.getElementById("video");
 const memeImg = document.getElementById("memeImg");
 const debugHud = document.getElementById("debugHud");
+const caption = document.getElementById("caption");
+const loadingOverlay = document.getElementById("loadingOverlay");
+const loadingMsg = document.getElementById("loadingMsg");
+const errorOverlay = document.getElementById("errorOverlay");
+const errorMsg = document.getElementById("errorMsg");
+const retryBtn = document.getElementById("retryBtn");
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let handLandmarker, faceLandmarker;
 let lastVideoTime = -1;
@@ -62,40 +88,88 @@ let lastFace = null; // { mouthCenter, faceWidth, mouthOpen, yawDeg, t }
 let lastFaceSeenThisFrame = false;
 let lastYawDebug = 0;
 
+function setLoading(t) {
+  if (loadingOverlay) loadingOverlay.hidden = false;
+  if (errorOverlay) errorOverlay.hidden = true;
+  if (loadingMsg && t) loadingMsg.textContent = t;
+}
+function setPlaying() {
+  if (loadingOverlay) loadingOverlay.hidden = true;
+  if (errorOverlay) errorOverlay.hidden = true;
+}
+function setError(msg) {
+  if (loadingOverlay) loadingOverlay.hidden = true;
+  if (errorOverlay) errorOverlay.hidden = false;
+  if (errorMsg) errorMsg.textContent = msg;
+}
+if (retryBtn) retryBtn.addEventListener("click", () => location.reload());
+
+async function createLandmarker(fileset, Kind, url, extra = {}) {
+  for (const delegate of ["GPU", "CPU"]) {
+    try {
+      return await Kind.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: url, delegate },
+        runningMode: "VIDEO",
+        ...extra,
+      });
+    } catch (e) {
+      if (delegate === "CPU") throw e;
+      // fall through to CPU
+    }
+  }
+}
+
 async function init() {
-  const fileset = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-  );
+  try {
+    setLoading("Loading models…");
+    const fileset = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
 
-  handLandmarker = await HandLandmarker.createFromOptions(fileset, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-      delegate: "GPU",
-    },
-    runningMode: "VIDEO",
-    numHands: 2,
-  });
+    setLoading("Starting hand + face models (GPU, CPU fallback)…");
+    handLandmarker = await createLandmarker(
+      fileset,
+      HandLandmarker,
+      "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      { numHands: 2 }
+    );
+    faceLandmarker = await createLandmarker(
+      fileset,
+      FaceLandmarker,
+      "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      {
+        numFaces: 1,
+        outputFacialTransformationMatrixes: true,
+        outputFaceBlendshapes: true,
+      }
+    );
 
-  faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-      delegate: "GPU",
-    },
-    runningMode: "VIDEO",
-    numFaces: 1,
-    outputFacialTransformationMatrixes: true,
-  });
+    setLoading("Requesting camera…");
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false,
+      });
+    } catch (e) {
+      setError(
+        e?.name === "NotAllowedError"
+          ? "Camera denied. Allow camera access, then press Retry."
+          : `No camera: ${e?.message || e}. Close Zoom/OBS, then press Retry.`
+      );
+      throw e;
+    }
+    video.srcObject = stream;
+    await video.play();
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: 640, height: 480 },
-    audio: false,
-  });
-  video.srcObject = stream;
-  await video.play();
-
-  requestAnimationFrame(loop);
+    setPlaying();
+    requestAnimationFrame(loop);
+  } catch (err) {
+    console.error(err);
+    if (errorOverlay?.hidden)
+      setError(`Failed to start: ${err?.message || err}. Check network (CDN), then press Retry.`);
+    throw err;
+  }
 }
 
 // ---- 3D-aware geometry helpers -----------------------------------------
@@ -230,10 +304,10 @@ function decideGesture(handResult) {
     }
 
     // two hands up near the face: either both resting on top of the head,
-    // or both held up beside the cheeks (crash-out-cat, pencil-in-mouth
-    // pose). Use the face box, when we have one, to tell them apart by
-    // height; otherwise fall back to "both hands close together and above
-    // the wrists" as a rough "hands near face" signal.
+    // or both held up beside the cheeks (crash-out-cat). Use the face box,
+    // when we have one, to tell them apart by height. Matches desktop:
+    // crash-out requires both hands to be fists - open hands near the face
+    // fall through instead of getting swallowed here.
     if (faceIsFresh) {
       const { mouthCenter, faceWidth } = lastFace;
       const nearFace = hands.every(
@@ -245,7 +319,10 @@ function decideGesture(handResult) {
         if (bothAboveHead) {
           return "twoHandsOnHead";
         }
-        return "crashOutCat";
+        const bothFists = hands.every((h) => h.curledCount === 4);
+        if (bothFists) {
+          return "crashOutCat";
+        }
       }
     }
   }
@@ -314,7 +391,19 @@ function pickImage(gesture) {
 function applyGesture(gesture) {
   if (gesture === currentGesture) return;
   currentGesture = gesture;
-  memeImg.src = pickImage(gesture);
+  const src = pickImage(gesture);
+  const swap = () => {
+    memeImg.src = src;
+    memeImg.alt = `Current meme: ${gesture} (${src.split("/").pop()})`;
+    memeImg.classList.remove("fading");
+  };
+  if (reduceMotion) {
+    swap();
+  } else {
+    memeImg.classList.add("fading");
+    setTimeout(swap, 120);
+  }
+  if (caption) caption.textContent = `${gesture} -> ${src.split("/").pop()}`;
 }
 
 function loop() {
@@ -359,4 +448,44 @@ function updateDebugHud() {
     `yaw: ${lastYawDebug >= 0 ? "+" : ""}${lastYawDebug.toFixed(1)} deg  (side-eye thr +/-${SIDE_EYE_YAW_DEG.toFixed(1)})`;
 }
 
-init().catch((err) => console.error(err));
+const helpBtn = document.getElementById("helpBtn");
+const helpOverlay = document.getElementById("helpOverlay");
+const helpList = document.getElementById("helpList");
+const helpClose = document.getElementById("helpClose");
+
+async function loadHelp() {
+  let data = null;
+  try {
+    const r = await fetch("gestures.json");
+    if (r.ok) data = await r.json();
+  } catch {
+    // offline/file:// fallback below
+  }
+  const items = data?.gestures ?? HELP_FALLBACK.map(([id, trigger]) => ({ id, trigger, desktopOnly: false }));
+  if (helpList)
+    helpList.innerHTML = items
+      .map(
+        (g) => `<li><b>${g.id}</b> — ${g.trigger}${g.desktopOnly ? " <i>(desktop-only)</i>" : ""}</li>`
+      )
+      .join("");
+}
+
+function toggleHelp(show) {
+  if (!helpOverlay) return;
+  const next = show ?? helpOverlay.hidden;
+  helpOverlay.hidden = !next;
+  if (next) loadHelp();
+}
+helpBtn?.addEventListener("click", () => toggleHelp(true));
+helpClose?.addEventListener("click", () => toggleHelp(false));
+helpOverlay?.addEventListener("click", (e) => {
+  if (e.target === helpOverlay) toggleHelp(false);
+});
+addEventListener("keydown", (e) => {
+  if (e.key === "?" || e.key === "/") toggleHelp(true);
+  if (e.key === "Escape") toggleHelp(false);
+});
+
+init().catch(() => {
+  // surfaced via setError above
+});

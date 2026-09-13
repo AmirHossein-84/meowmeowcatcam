@@ -2,12 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Gesture Meme Detector</title>
 <style>
   html, body {
     margin: 0;
     height: 100%;
     background: #000;
+    color: #eee;
+    font-family: system-ui, sans-serif;
     overflow: hidden;
   }
   .split {
@@ -20,6 +23,7 @@
     position: relative;
     overflow: hidden;
     background: #000;
+    min-height: 0;
   }
   #video {
     width: 100%;
@@ -32,7 +36,10 @@
     height: 100%;
     object-fit: contain;
     background: #000;
+    opacity: 1;
+    transition: opacity 0.25s ease;
   }
+  #memeImg.fading { opacity: 0; }
   #debugHud {
     position: absolute;
     top: 8px;
@@ -44,16 +51,100 @@
     pointer-events: none;
     z-index: 2;
   }
+  #caption {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    right: 8px;
+    font: 13px/1.4 monospace;
+    color: #fff;
+    background: rgba(0,0,0,.55);
+    padding: 4px 8px;
+    border-radius: 6px;
+    z-index: 2;
+  }
+  #helpBtn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 5;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid #555;
+    background: rgba(0,0,0,.6);
+    color: #fff;
+    font-size: 18px;
+    cursor: pointer;
+  }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    background: rgba(0,0,0,.82);
+    z-index: 10;
+    text-align: center;
+    padding: 24px;
+  }
+  .overlay[hidden] { display: none; }
+  #errorOverlay { background: rgba(40,0,0,.88); }
+  #retryBtn { padding: 8px 16px; font-size: 15px; cursor: pointer; }
+  #helpOverlay .dialog {
+    background: #111;
+    border: 1px solid #444;
+    border-radius: 10px;
+    max-width: 520px;
+    width: min(92vw,520px);
+    max-height: 80vh;
+    overflow: auto;
+    padding: 16px 20px;
+    text-align: left;
+  }
+  #helpOverlay ul { padding-left: 18px; margin: 8px 0; }
+  #helpOverlay li { margin: 4px 0; font-size: 14px; }
+  #helpOverlay .subset-note { font-size: 13px; color: #bbb; }
+  @media (max-width: 700px) {
+    .split { flex-direction: column; }
+    .pane { flex: 1 1 50%; min-height: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #memeImg { transition: none; }
+  }
 </style>
 </head>
 <body>
+  <noscript><p style="padding:16px">This app needs JavaScript + camera access to detect gestures.</p></noscript>
   <div class="split">
     <div class="pane">
       <video id="video" playsinline muted autoplay></video>
-      <div id="debugHud"></div>
+      <div id="debugHud" aria-hidden="true"></div>
+      <div id="caption" aria-live="polite">default -&gt; pokercat.jpg</div>
     </div>
     <div class="pane">
-      <img id="memeImg" src="memes/pokercat.jpg" alt="" />
+      <img id="memeImg" src="memes/pokercat.jpg" alt="Current meme: poker-face cat (default gesture)" />
+      <button id="helpBtn" aria-label="Show gesture cheat sheet" title="Gestures (?)">?</button>
+    </div>
+  </div>
+
+  <div id="loadingOverlay" class="overlay" role="status">
+    <div id="loadingMsg">Loading models…</div>
+  </div>
+
+  <div id="errorOverlay" class="overlay" role="alert" hidden>
+    <div id="errorMsg">Camera unavailable.</div>
+    <button id="retryBtn" type="button">Retry</button>
+  </div>
+
+  <div id="helpOverlay" class="overlay" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <h2 id="helpTitle">Gestures</h2>
+      <p class="subset-note">Browser: 11/16 gestures. Spin, dance, mouth-open, huh, side-eye-down are desktop-only.</p>
+      <ul id="helpList"><li>Loading…</li></ul>
+      <button id="helpClose" type="button">Close (Esc)</button>
     </div>
   </div>
 

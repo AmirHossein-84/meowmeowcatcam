@@ -1,79 +1,110 @@
 # Gesture Meme Detector
 
-Turn the camera on, make some gestures listed below to have the cat meme pop up next to you!
+Turn the camera on, make a gesture, and the matching cat meme pops up next to you!
 
-It will show up as:
-- **Camera** — your webcam feed with hand landmarks drawn on top, plus a live debug readout in the corner
+It shows:
+- **Camera** — your webcam feed with hand landmarks, a live debug readout (`H` toggles), a gesture cheat-sheet (`?`), and a caption of the current gesture
 - **Meme** — the meme matching whatever gesture you're currently making
 
-## Gestures
+Video is processed locally and never uploaded. The browser build fetches MediaPipe code/models from jsDelivr + Google Cloud Storage once at startup.
 
-| # | Gesture | How to trigger |
+## Gestures (16 total, `gestures.json` is the source of truth)
+
+Desktop implements all 16. Browser implements the 11 scoped subset — spin, dance, mouth-open, huh, and side-eye-down are desktop-only and marked as such in-app.
+
+| Gesture | How to trigger | Meme |
 |---|---|---|
-| 1 | Fingers Together (muehehe) | Both hands up, index fingers only, tips touching |
-| 2 | Devastated cat | Both hands up, above the top of your head |
-| 3 | Crash out Cat | Both hands up beside your face, not above your head |
-| 4 | Fist | One hand, all four fingers curled |
-| 5 | Rockstar | Thumb + pinky out |
-| 6 | Shhh | Index finger only, tip resting on your mouth |
-| 7 | One Finger Up | Index finger only, held away from your face |
-| 8 | Kidnap cat | Any hand shape sitting where your face just was |
-| 9 | i HAVE NO MONIES | One open palm, all fingers extended, away from your face |
-| 10 | Side Eye | Just turn your head |
-| 11 | Default | Nothing in particular, hands down |
-| 12 | Judgy cat while munching on food | Look down slightly sideways 
-| 13 | Huh | Open your mouth and be shocked 
-| 14 | O I I.A I | SPIN SPIN SPIN 
+| Rockstar / Shaka | Thumb + pinky out | `cat.jpg` |
+| Default | Nothing in particular, hands down | `pokercat.jpg` |
+| One Finger Up | Index finger only, held away from face | `profcat.jpg`, `professorcat.jpg` |
+| Fist | One hand, all four fingers curled | `punchcat.jpg` |
+| Shhh | Index finger only, tip on mouth | `shhcat.jpg` |
+| Fingers Together (muehehe) | Both hands up, index fingers only, tips touching | `uwucat.jpg`, `uwucatt.jpg`, `fingers-together-muehehe.jpg` |
+| Kidnap cat | Any hand shape where your face just was | `hand-cover-face.jpg` |
+| Crash-out Cat | Both hands up beside face, **both fists** | `crashout-cat.jpg` |
+| Devastated cat | Both hands up, above head | `two-hands-on-head.jpg` |
+| No monies | One open palm, away from face | `hand-stretched-out-palm-up.jpg` |
+| Side Eye | Turn your head sideways | `side-eye-cat.jpg` |
+| Judgy cat (desktop, experimental) | Look down slightly sideways | `side-eye-down.png` |
+| Laugh and point (desktop) | Mouth wide open WITH a hand visible | `laugh-and-point.jpg` |
+| Huh (desktop) | Mouth open AND eyes wide, no hands | `huh.png` |
+| Dance (desktop, experimental) | Two open palms, one top + one bottom | `two-palms-up.mov` |
+| Spin (desktop, experimental) | SPIN in your chair | `spin-cat.mov` |
 
-Meme images live in `memes/`. A couple of gestures pick randomly between multiple images.
+`memes/iunno-cat.jpg` is reserved for a future shrug gesture (not wired yet).
 
-## Running it — desktop (Python)
+## Running it — desktop (Python, full 16 gestures)
 
-Requires Python 3 and a webcam.
+Requires Python **>=3.11** and a webcam.
 
-Easiest way: just double click **`Launch Gesture Meme.command`**. First run takes a minute to set itself up (installs everything automatically), then launches straight away. Every run after that is instant.
+- macOS/Linux: double-click **`Launch Gesture Meme.command`**
+- Windows: double-click **`Launch Gesture Meme.bat`**
 
-**First time opening it:** macOS will warn "cannot be opened because it is from an unidentified developer" — this is normal for any downloaded script, not specific to this one. Right-click the file → **Open** → click **Open** in the dialog that appears. You only need to do this once.
+First run creates `.venv` and installs `requirements.txt` (~90MB, a few minutes). Later runs are instant. Press `q` or `Esc` to quit, `H` for HUD, `?` for help.
 
-Or manually, if you prefer Terminal:
+Manual:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python3 gesture_meme.py
 ```
 
-Press `q` or `Esc` in the Camera window to quit.
+If the camera fails: check OS permissions, close Zoom/OBS/Teams (only one app can hold the camera), then retry. The app tries index 0 then 1.
 
-## Running it — browser
+## Running it — browser (11 gestures)
 
-No install needed, but the webcam API requires serving over HTTP (opening `index.html` directly as a `file://` URL will not get camera permission). From this folder:
+No install, but the webcam API needs HTTP (opening `index.html` as `file://` won't get camera permission):
 
 ```bash
-python3 -m http.server 8000
+python3 -m http.server 8901
 ```
 
-Then open `http://localhost:8000` and allow camera access. Models load from Google's hosted MediaPipe CDN at runtime, so nothing local is needed for the browser version.
+Then open `http://localhost:8901/` and allow camera access. Or on Windows double-click **`Launch Web Meme.bat`** (serves port 8901, local only). Models load from the pinned MediaPipe CDN (`tasks-vision@0.10.14`) at runtime.
+
+The page shows loading → permission → playing → error states (camera-denied / CDN-blocked / GPU-unsupported show a message + Retry instead of a black page). Press `?` for the gesture list.
 
 ## Live debug HUD
 
-The Camera window always shows a small readout in the top-left corner:
+Desktop Camera window:
 
 ```
 gesture: sideEyeCat
 yaw: +18.4 deg  (side-eye thr +/-15.0)
+flow mag / spin fraction / peak, jawOpen/eyeWide, smile/brow/wink, pitch
 ```
 
-Useful for tuning the detection thresholds at the top of `gesture_meme.py` / `app.js` if a gesture is triggering too easily or not easily enough for your setup/lighting.
+Browser shows gesture + yaw. Tune thresholds at the top of `gesture_meme.py` / `gestures.json` if a gesture misfires for your setup. Spin/huh/dance/side-eye-down thresholds are experimental — see the tuning comments in code before changing them; spin overrides everything and needs labeled sessions to retune safely.
+
+`flow_debug_log.csv` appends every run (rotates at 5MB to `.1`); columns are `wall_ms,t_monotonic_ms,magnitude,coherence,score,fraction,peak_2s,gesture`.
 
 ## Project layout
 
 ```
 gesture_meme.py   desktop version (OpenCV + MediaPipe Python tasks API)
-app.js            browser version (MediaPipe tasks-vision WASM)
-index.html        browser UI shell
-memes/            meme images (+ one video, unused for now)
-models/           MediaPipe .task model files used by the desktop version
-requirements.txt  Python dependencies
+app.js            browser version (MediaPipe tasks-vision WASM, 11-gesture subset)
+index.html        browser UI shell (loading/error/help/caption states)
+gestures.json     shared gesture spec (names, triggers, memes, thresholds)
+memes/            meme images + 2 video memes (kebab-case filenames)
+models/           MediaPipe .task files for desktop (offline; scripts/download_models.py re-fetches)
+requirements.txt  runtime deps (opencv-python, numpy<2, mediapipe>=0.10.14)
+scripts/          download_models.py (model fetch + checksum)
+tests/            pytest: geometry + decide() priority + asset manifest/parity
+Launch Gesture Meme.command / .bat   desktop launchers
+Launch Web Meme.bat                  web launcher (local :8901)
 ```
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+ruff check .
+node --check app.js
+python scripts/download_models.py --check-only
+```
+
+CI (`.github/workflows/ci.yml`) runs pytest + ruff + `node --check` on Python 3.11–3.13 × Ubuntu/Windows, plus non-blocking `pip-audit` and Dependabot.
+
+Uninstall: delete `.venv/`; nothing else is installed (no autostart, no background processes).

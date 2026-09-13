@@ -1,0 +1,11 @@
+[project]
+name = "meowmeowcatcam"
+version = "0.1.0"
+description = "Webcam gesture -> cat meme detector (desktop + browser)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
